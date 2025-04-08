@@ -17,34 +17,39 @@
 
 #include "opengl_renderer3d.hpp"
 
+#ifndef GL_GLEXT_PROTOTYPES
+#define GL_GLEXT_PROTOTYPES
+#endif
 #ifdef __APPLE__
 #define GL_SILENCE_DEPRECATION
 #include <OpenGL/gl3.h>
 #include <OpenGL/gl3ext.h>
 #else
 #include <GL/gl.h>
-//#include <GL/glcorearb.h>
 #endif
+
+#ifdef __linux__
+#include <GL/glext.h>
+#define EGL_EGLEXT_PROTOTYPES
+#include <EGL/egl.h>
+#include <EGL/eglext.h>
+#elif defined(WIN32)
+#include <SDL2/SDL_opengl_glext.h>
+#endif
+
 #include <cmath>
 #include "wrap_SDL.h"
 
-#include "../../../main.hpp"
-#include "../../../base/log.hpp"
-#include "../../../utils/gui2/widgets/image.hpp"
-#include "../../../types/command.hpp"
-#include "../../../base/sdl_surface.hpp"
-#include "../../../base/utils.hpp"
-#include "../../../base/math/bluntmath.hpp"
-
 #include "../../../base/geometry/aabb.hpp"
 #include "../../../base/geometry/trianglemeshutils.hpp"
-
+#include "../../../base/log.hpp"
+#include "../../../base/math/bluntmath.hpp"
+#include "../../../base/sdl_surface.hpp"
+#include "../../../base/utils.hpp"
+#include "../../../main.hpp"
+#include "../../../types/command.hpp"
+#include "../../../utils/gui2/widgets/image.hpp"
 #include "../resources/texture.hpp"
-
-#ifdef WIN32
-#include <wingdi.h>
-#endif
-
 
 namespace blunted {
 
@@ -56,7 +61,7 @@ struct GLfunctions {
 
 GLfunctions mapping;
 
-OpenGLRenderer3D::OpenGLRenderer3D() : context(0) {
+OpenGLRenderer3D::OpenGLRenderer3D() {
   DO_VALIDATION;
   FOV = 45;
   overallBrightness = 128;
@@ -70,17 +75,15 @@ OpenGLRenderer3D::OpenGLRenderer3D() : context(0) {
 
 OpenGLRenderer3D::~OpenGLRenderer3D() {
     DO_VALIDATION;
-    DeleteSimpleVertexBuffer(overlayBuffer);
-    DeleteSimpleVertexBuffer(quadBuffer);
-    // Shut down all SDL subsystems
-    SDL_Quit();
 };
 
 void OpenGLRenderer3D::SwapBuffers() {
   DO_VALIDATION;
-  last_screen_.resize(1280 * 720 * 3);
-  SDL_GL_SwapWindow(window);
-  mapping.glReadPixels(0, 0, 1280, 720, GL_RGB, GL_UNSIGNED_BYTE,
+  last_screen_.resize(context_width * context_height * 3);
+  if (window) {
+    SDL_GL_SwapWindow(window);
+  }
+  mapping.glReadPixels(0, 0, context_width, context_height, GL_RGB, GL_UNSIGNED_BYTE,
                        &last_screen_[0]);
 }
 
@@ -96,8 +99,6 @@ void OpenGLRenderer3D::RenderOverlay2D(
     const std::vector<Overlay2DQueueEntry> &overlay2DQueue) {
   DO_VALIDATION;
 
-  assert(context);
-
   if (overlay2DQueue.empty()) {
     return;
   }
@@ -110,7 +111,7 @@ void OpenGLRenderer3D::RenderOverlay2D(
 
   UseShader("overlay");
 
-  Matrix4 orthoMatrix = CreateOrthoMatrix(0, 1280, 720, 0, 0.1, 10);
+  Matrix4 orthoMatrix = CreateOrthoMatrix(0, context_width, context_height, 0, 0.1, 10);
   SetMatrix("projection", orthoMatrix);
 
   mapping.glBindVertexArray(overlayBuffer.vertexArrayID);
@@ -139,7 +140,6 @@ void OpenGLRenderer3D::RenderOverlay2D(
 
 void OpenGLRenderer3D::RenderOverlay2D() {
   DO_VALIDATION;
-  assert(context);
 
   Matrix4 orthoMatrix = CreateOrthoMatrix(-1, 1, -1, 1, 0.0f, 1.0f);
   SetMatrix("orthoProjectionMatrix", orthoMatrix);
@@ -204,7 +204,7 @@ void OpenGLRenderer3D::RenderLights(std::deque<LightQueueEntry> &lightQueue,
   DO_VALIDATION;
   Vector3 cameraPos = viewMatrix.GetInverse().GetTranslation();
 
-//  mapping.glDisable(GL_ALPHA_TEST);
+  //  mapping.glDisable(GL_ALPHA_TEST);
 
   SetUniformFloat3(currentShader->first, "cameraPosition", cameraPos.coords[0],
                    cameraPos.coords[1], cameraPos.coords[2]);
@@ -375,24 +375,8 @@ void OpenGLRenderer3D::InitializeOverlayAndQuadBuffers() {
   quadBuffer = CreateSimpleVertexBuffer(quadVertices, sizeof(quadVertices));
 }
 
-bool OpenGLRenderer3D::CreateContext(int width, int height, int bpp,
-                                     bool fullscreen) {
+void OpenGLRenderer3D::CreateContextSdl() {
   DO_VALIDATION;
-  this->context_width = width;
-  this->context_height = height;
-  this->context_bpp = bpp;
-
-  // default values
-  this->cameraNear = 30.0;
-  this->cameraFar = 270.0;
-
-  // #ifdef __linux__
-  //     #include <X11/Xlib.h>
-  //     XInitThreads();
-  // #endif
-
-  //#ifdef WIN32
-  // SDL subsystems must be initialized before setting attributes
   SDL_Init(SDL_INIT_VIDEO);
 
   SDL_GL_SetAttribute(SDL_GL_RED_SIZE, 8);
@@ -411,23 +395,28 @@ bool OpenGLRenderer3D::CreateContext(int width, int height, int bpp,
   SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
 #endif
 
-  // recently disabled  SDL_GL_SetAttribute(SDL_GL_SWAP_CONTROL, 1); // wait for
-  // vsync?
-  //  int SDLerror = SDL_GL_SetSwapInterval(-1);
-  //  if (SDLerror == -1) SDL_GL_SetSwapInterval(1);
-
-  //#endif
-
   window = SDL_CreateWindow("Google Research Football", SDL_WINDOWPOS_UNDEFINED,
-                            SDL_WINDOWPOS_UNDEFINED, width, height,
-                            SDL_WINDOW_OPENGL /* | SDL_RESIZABLE*/ |
-                                (fullscreen ? SDL_WINDOW_FULLSCREEN : 0));
+                            SDL_WINDOWPOS_UNDEFINED, context_width,
+                            context_height, SDL_WINDOW_OPENGL);
   context = SDL_GL_CreateContext(window);
 
-  //    *reinterpret_cast<void**>(&(mapping.func)) =
-  //    SDL_GL_GetProcAddress(#func); *reinterpret_cast<void**>(&(mapping.func))
-  //    = (void*) func;
-
+  if (!context) {
+    DO_VALIDATION;
+    std::string errorString = SDL_GetError();
+    std::cout << "Failed on SDL error: " << errorString << std::endl;
+    std::cout << "You can solve this problem by:" << std::endl;
+    std::cout << "1) If you are running inside Docker make sure container has "
+                 "access to XServer by running (outside of the container):"
+              << std::endl;
+    std::cout << "  > xhost +\"local:docker@\"" << std::endl;
+    std::cout << "2) Switch to off-screen rendering by unsetting DISPLAY "
+                 "environment variable"
+              << std::endl;
+    std::cout
+        << "3) Disable 3D rendering (which makes environment run much faster)."
+        << std::endl;
+    exit(1);
+  }
 #define SDL_PROC(ret, func, params)                                        \
   do {                                                                     \
     *reinterpret_cast<void **>(&(mapping.func)) =                          \
@@ -443,84 +432,154 @@ bool OpenGLRenderer3D::CreateContext(int width, int height, int bpp,
   } while (0);
 #include "sdl_glfuncs.h"
 #undef SDL_PROC
-
-
-    int glVersion[2] = { 0, 0 };
-    //ASSERT_TRUE(glGetIntegervFunc != nullptr);
-    mapping.glGetIntegerv(GL_MAJOR_VERSION, &glVersion[0]);
-    mapping.glGetIntegerv(GL_MINOR_VERSION, &glVersion[1]);
-    //printf("Debug: OpenGL version: %i.%i\n", glVersion[0], glVersion[1]);
-
-    if (!context) {
-      DO_VALIDATION;
-      std::string errorString = SDL_GetError();
-      Log(e_FatalError, "OpenGLRenderer3D", "CreateContext", "Failed on SDL errwwwwor: " + errorString);
-      return false;
-    }
-
-    bool higherThan32 = false;
-    if (glVersion[0] < 4) {
-      DO_VALIDATION;
-      if (glVersion[0] == 3 && glVersion[1] >= 2) higherThan32 = true;
-    } else
-      higherThan32 = true;
-
-    if (!higherThan32) Log(e_Warning, "OpenGLRenderer3D", "CreateContext", "OpenGL version not equal to or higher than 3.2 (or not reported as such)");
-
-    //SDL_WM_SetCaption("Gameplay Football", NULL);
-
+}
 
 #ifdef __linux__
-    bool success = true;//glXSwapIntervalSGI(-1); // anti-tear blah
+// Helper macro to check for EGL errors.
+#define FAIL_IF_EGL_ERROR(egl_expr)                             \
+  do {                                                          \
+    (egl_expr);                                                 \
+    auto error = eglGetError();                                 \
+    if (error != EGL_SUCCESS) {                                 \
+      Log(e_FatalError, "OpenGLRenderer3D", "CreateContextEgl", \
+          "EGL failure: " + int_to_str(__LINE__));              \
+    }                                                           \
+  } while (false)
+
+void OpenGLRenderer3D::CreateContextEgl() {
+  static const int MAX_DEVICES = 16;
+  EGLDeviceEXT eglDevs[MAX_DEVICES];
+  EGLint numDevices;
+  PFNEGLQUERYDEVICESEXTPROC eglQueryDevicesEXT =
+      (PFNEGLQUERYDEVICESEXTPROC)eglGetProcAddress("eglQueryDevicesEXT");
+  if (eglQueryDevicesEXT == nullptr) {
+    Log(e_FatalError, "OpenGLRenderer3D", "CreateContextEgl",
+        "Failed on obtain eglQueryDevicesEXT function");
+  }
+  eglQueryDevicesEXT(MAX_DEVICES, eglDevs, &numDevices);
+
+  PFNEGLGETPLATFORMDISPLAYEXTPROC eglGetPlatformDisplayEXT =
+      (PFNEGLGETPLATFORMDISPLAYEXTPROC)eglGetProcAddress(
+          "eglGetPlatformDisplayEXT");
+  if (eglGetPlatformDisplayEXT == nullptr) {
+    Log(e_FatalError, "OpenGLRenderer3D", "CreateContextEgl",
+        "Failed on obtain eglGetPlatformDisplayEXT function");
+  }
+  EGLBoolean success;
+  int major, minor;
+  for (EGLint i = 0; i < numDevices; ++i) {
+    EGLDisplay display =
+        eglGetPlatformDisplayEXT(EGL_PLATFORM_DEVICE_EXT, eglDevs[i], nullptr);
+    if (eglGetError() == EGL_SUCCESS && display != EGL_NO_DISPLAY) {
+      success = eglInitialize(display, &major, &minor);
+      if (eglGetError() == EGL_SUCCESS && success == EGL_TRUE) {
+        egl_display = display;
+        break;
+      }
+    }
+  }
+  if (egl_display == EGL_NO_DISPLAY) {
+    Log(e_FatalError, "OpenGLRenderer3D", "CreateContextEgl",
+        "Failed on construct EGL Display");
+  }
+
+  FAIL_IF_EGL_ERROR(success = eglBindAPI(EGL_OPENGL_API));
+  EGLint num_configs;
+  EGLConfig egl_config;
+  constexpr EGLint kConfigAttribs[] = {EGL_RED_SIZE,
+                                       8,
+                                       EGL_GREEN_SIZE,
+                                       8,
+                                       EGL_BLUE_SIZE,
+                                       8,
+                                       EGL_SURFACE_TYPE,
+                                       EGL_PBUFFER_BIT,
+                                       EGL_RENDERABLE_TYPE,
+                                       EGL_OPENGL_BIT,
+                                       EGL_NONE};
+  FAIL_IF_EGL_ERROR(success = eglChooseConfig(egl_display, kConfigAttribs,
+                                              &egl_config, 1, &num_configs));
+
+  // Create EGL surface.
+  EGLint kPixelBufferAttribs[] = {
+      EGL_WIDTH, context_width, EGL_HEIGHT, context_height, EGL_NONE,
+  };
+  FAIL_IF_EGL_ERROR(egl_surface = eglCreatePbufferSurface(
+                        egl_display, egl_config, kPixelBufferAttribs));
+
+  FAIL_IF_EGL_ERROR(egl_context = eglCreateContext(egl_display, egl_config,
+                                                   EGL_NO_CONTEXT, nullptr));
+  FAIL_IF_EGL_ERROR(
+      eglMakeCurrent(egl_display, egl_surface, egl_surface, egl_context));
+#define SDL_PROC(ret, func, params)                                        \
+  do {                                                                     \
+    *reinterpret_cast<void **>(&(mapping.func)) =                          \
+        (void*) eglGetProcAddress(#func);                                          \
+    if (!mapping.func) {                                                   \
+      DO_VALIDATION;                                                       \
+      printf("Couldn't load mapping.gl function %s\n", #func); \
+      SDL_SetError("Couldn't load mapping.gl function %s\n", #func);               \
+      print_stacktrace();                                                  \
+      exit(1);                                                             \
+    }                                                                      \
+  } while (0);
+#include "sdl_glfuncs.h"
+#undef SDL_PROC
+}
 #endif
 
-    largest_supported_anisotropy = 2;
-//#ifndef __APPLE__  // Can be used to check for Core Profile Mode on Linux
-    mapping.glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, &largest_supported_anisotropy);
-//#endif
-    //largest_supported_anisotropy = clamp(largest_supported_anisotropy, 0, 8); // don't overdo it
+bool OpenGLRenderer3D::CreateContext(int width, int height, int bpp,
+                                     bool fullscreen) {
+  this->context_width = width;
+  this->context_height = height;
+  this->context_bpp = bpp;
 
-//    mapping.glDisable(GL_LIGHTING);
+  // default values
+  this->cameraNear = 30.0;
+  this->cameraFar = 270.0;
+#ifdef __linux__
+  if (!getenv("DISPLAY")) {
+    std::cout << "No DISPLAY defined, doing off-screen rendering" << std::endl;
+    CreateContextEgl();
+  } else {
+    CreateContextSdl();
+  }
+#else
+  CreateContextSdl();
+#endif
+  largest_supported_anisotropy = 2;
+  mapping.glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT,
+                      &largest_supported_anisotropy);
 
-    GLfloat color[4] = { 0, 0, 0, 0 };
-//    mapping.glMaterialfv(GL_FRONT, GL_SPECULAR, color);
-//    mapping.glMateriali(GL_FRONT, GL_SHININESS, 80);
+  mapping.glDisable(GL_MULTISAMPLE);
+  mapping.glCullFace(GL_BACK);
 
-    // enable color tracking
-//    mapping.glEnable(GL_COLOR_MATERIAL);
-//    mapping.glColorMaterial(GL_FRONT, GL_AMBIENT_AND_DIFFUSE);
+  // shaders
+  LoadShader("simple", "media/shaders/simple");
+  LoadShader("lighting", "media/shaders/lighting");
+  LoadShader("ambient", "media/shaders/ambient");
+  LoadShader("zphase", "media/shaders/zphase");
+  LoadShader("postprocess", "media/shaders/postprocess");
+  LoadShader("overlay", "media/shaders/overlay");
 
-    mapping.glDisable(GL_MULTISAMPLE);
-    mapping.glCullFace(GL_BACK);
+  currentShader = shaders.begin();
 
+  SDL_Surface *noise = IMG_LoadBmp("media/shaders/noise.png");
+  noiseTexID =
+      CreateTexture(e_InternalPixelFormat_RGB8, e_PixelFormat_RGB, noise->w,
+                    noise->h, false, true, false, false, false);
+  UpdateTexture(noiseTexID, noise, false, false);
+  SDL_FreeSurface(noise);
 
-    // shaders
+  // create buffers for overlay and simple quad rendering to use shaders instead
+  // of fixed pipeline.
+  InitializeOverlayAndQuadBuffers();
 
-    LoadShader("simple", "media/shaders/simple");
-    LoadShader("lighting", "media/shaders/lighting");
-    LoadShader("ambient", "media/shaders/ambient");
-    LoadShader("zphase", "media/shaders/zphase");
-    LoadShader("postprocess", "media/shaders/postprocess");
-    LoadShader("overlay", "media/shaders/overlay");
-
-    currentShader = shaders.begin();
-
-
-    SDL_Surface *noise = IMG_LoadBmp("media/shaders/noise.png");
-    noiseTexID = CreateTexture(e_InternalPixelFormat_RGB8, e_PixelFormat_RGB, noise->w, noise->h, false, true, false, false, false);
-    UpdateTexture(noiseTexID, noise, false, false);
-    SDL_FreeSurface(noise);
-
-    // create buffers for overlay and simple quad rendering to use shaders instead of fixed pipeline
-    InitializeOverlayAndQuadBuffers();
-
-    mapping.glClearColor(0, 0, 0, 0);
-    mapping.glClearDepth(1.0);
-    mapping.glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
-
-    mapping.glDisable(GL_MULTISAMPLE);
-
-    return true;
+  mapping.glClearColor(0, 0, 0, 0);
+  mapping.glClearDepth(1.0);
+  mapping.glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+  mapping.glDisable(GL_MULTISAMPLE);
+  return true;
 }
 
 void OpenGLRenderer3D::Exit() {
@@ -537,6 +596,8 @@ void OpenGLRenderer3D::Exit() {
   }
 
   currentShader = shaders.end();
+  DeleteSimpleVertexBuffer(overlayBuffer);
+  DeleteSimpleVertexBuffer(quadBuffer);
 
   // assert(views.size() == 0);
 }
@@ -1485,10 +1546,10 @@ GLenum GetGLPixelFormat(e_PixelFormat pixelFormat) {
     case e_PixelFormat_DepthComponent:
       format = GL_DEPTH_COMPONENT;
       break;
-//  Deprecated:
-//    case e_PixelFormat_Luminance:
-//      format = GL_LUMINANCE;
-//      break;
+    case e_PixelFormat_Luminance:
+      Log(e_Error, "OpenGLRenderer3D", "GetGLPixelFormat",
+          "e_PixelFormat_Luminance not supported");
+      break;
   }
 
   return format;
@@ -1883,12 +1944,20 @@ bool OpenGLRenderer3D::CheckFrameBufferStatus() {
 void OpenGLRenderer3D::SetRenderTargets(
     std::vector<e_TargetAttachment> targetAttachments) {
   DO_VALIDATION;
+#ifdef WIN32
+  std::vector<GLenum> targets(targetAttachments.size());
+#else
   GLenum targets[targetAttachments.size()];
+#endif
   for (int i = 0; i < (signed int)targetAttachments.size(); i++) {
     DO_VALIDATION;
     targets[i] = GetGLTargetAttachment(targetAttachments[i]);
   }
+#ifdef WIN32
+  mapping.glDrawBuffers(targetAttachments.size(), &targets[0]);
+#else
   mapping.glDrawBuffers(targetAttachments.size(), targets);
+#endif
 }
 
   // utility
@@ -1971,8 +2040,13 @@ void GeneratePoissonKernel(float *kernel, unsigned int kernelSize) {
     DO_VALIDATION;
     unsigned int candidateSize = 32;
 
+#ifdef WIN32
+    std::vector<Vector3> samples(kernelSize);
+    std::vector<Vector3> candidates(candidateSize);
+#else
     Vector3 samples[kernelSize];
     Vector3 candidates[candidateSize];
+#endif
 
     for (unsigned int i = 0; i < kernelSize; i++) {
       DO_VALIDATION;
@@ -2040,8 +2114,11 @@ void GeneratePoissonKernel(float *kernel, unsigned int kernelSize) {
     }
 
   } else {  // PRECALCULATED SET
-
+#ifdef WIN32
+    std::vector<Vector3> samples(kernelSize);
+#else
     Vector3 samples[kernelSize];
+#endif
 
     // these samples seem relatively close to z = 0 (much 'ground effect' on
     // flat surface)
@@ -2195,7 +2272,11 @@ void OpenGLRenderer3D::LoadShader(const std::string &name,
 
     unsigned int kernelSize = 32;
     // SetUniformInt("ambient", "SSAO_kernelSize", kernelSize);
+#ifdef WIN32
+    std::vector<float> SSAO_kernel(kernelSize * 3);
+#else
     float SSAO_kernel[kernelSize * 3];
+#endif
     GeneratePoissonKernel(&SSAO_kernel[0], kernelSize);
     SetUniformFloat3Array("ambient", "SSAO_kernel", kernelSize,
                           &SSAO_kernel[0]);
